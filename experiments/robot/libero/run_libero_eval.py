@@ -59,7 +59,8 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    # pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b"     # Pretrained checkpoint path
+    pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b-finetuned-libero-spatial"     # Pretrained checkpoint path
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
@@ -77,6 +78,7 @@ class GenerateConfig:
     #################################################################################################################
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
+    rollout_root_dir: str = "~/Desktop/openvla_libero_rollouts"  # Root directory for rollout videos
 
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
     wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
@@ -124,6 +126,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
     local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
+    resolved_rollout_root_dir = os.path.expanduser(cfg.rollout_root_dir)
+    print(f"Rollout videos will be saved under: {resolved_rollout_root_dir}")
+    log_file.write(f"Rollout videos will be saved under: {resolved_rollout_root_dir}\n")
 
     # Initialize Weights & Biases logging as well
     if cfg.use_wandb:
@@ -169,6 +174,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Setup
             t = 0
+            done = False
             replay_images = []
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
@@ -242,7 +248,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Save a replay video of the episode
             save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+                replay_images,
+                total_episodes,
+                success=done,
+                task_description=task_description,
+                task_name=task.name,
+                task_suite_name=cfg.task_suite_name,
+                rollout_root_dir=cfg.rollout_root_dir,
+                log_file=log_file,
             )
 
             # Log current results

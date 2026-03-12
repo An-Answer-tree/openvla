@@ -2,6 +2,7 @@
 
 import math
 import os
+import re
 
 import imageio
 import numpy as np
@@ -58,12 +59,41 @@ def get_libero_image(obs, resize_size):
     return img
 
 
-def save_rollout_video(rollout_images, idx, success, task_description, log_file=None):
+def _slugify_path_component(value, max_length=80):
+    """Converts text into a filesystem-friendly path component."""
+    normalized = value.strip().lower().replace("\n", " ")
+    normalized = re.sub(r"\s+", "_", normalized)
+    normalized = re.sub(r"[^a-z0-9._-]", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("._")
+    if not normalized:
+        return "task"
+    return normalized[:max_length]
+
+
+def save_rollout_video(
+    rollout_images,
+    idx,
+    success,
+    task_description,
+    task_name=None,
+    task_suite_name=None,
+    rollout_root_dir=None,
+    log_file=None,
+):
     """Saves an MP4 replay of an episode."""
-    rollout_dir = f"./rollouts/{DATE}"
+    if rollout_root_dir is None:
+        rollout_dir = f"./rollouts/{DATE}"
+    else:
+        suite_dir = _slugify_path_component(task_suite_name or "libero")
+        task_dir = _slugify_path_component(task_name or task_description)
+        rollout_dir = os.path.join(os.path.expanduser(rollout_root_dir), suite_dir, task_dir)
+
     os.makedirs(rollout_dir, exist_ok=True)
-    processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
-    mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"
+    processed_task_description = _slugify_path_component(task_description, max_length=50)
+    mp4_path = os.path.join(
+        rollout_dir,
+        f"{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4",
+    )
     video_writer = imageio.get_writer(mp4_path, fps=30)
     for img in rollout_images:
         video_writer.append_data(img)
