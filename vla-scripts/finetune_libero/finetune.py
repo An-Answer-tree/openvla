@@ -39,6 +39,7 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
+from camera_views import CAMERA_VIEW_MAP, SUPPORTED_CAMERA_NAMES
 from dataset import LiberoMultiviewDataset
 
 # Sane Defaults
@@ -53,16 +54,16 @@ class FinetuneConfig:
     # Directory Paths
     data_root_dir: Path = Path("/mnt/HDD-6940GB/Dataset/LIBERO-datasets-multiview") # Path to multiview LIBERO root
     dataset_name: str = "libero_spatial"                                            # LIBERO benchmark directory name
-    camera_view: str = "agentview_rgb"                                              # Camera view key in HDF5 obs group
+    camera_name: str = "agentview"                                                  # One of: agentview, topview, leftview, rightview, backview
     run_root_dir: Path = Path("runs")                                               # Path to directory to store logs & checkpoints
     adapter_tmp_dir: Path = Path("adapter-tmp")                                     # Temporary directory for LoRA weights before fusing
 
     # Fine-tuning Parameters
-    batch_size: int = 16                                                            # Fine-tuning batch size
+    batch_size: int = 4                                                            # Fine-tuning batch size
     max_steps: int = 200_000                                                        # Max number of fine-tuning steps
     save_steps: int = 5000                                                          # Interval for checkpoint saving
     learning_rate: float = 5e-4                                                     # Fine-tuning learning rate
-    grad_accumulation_steps: int = 1                                                # Gradient accumulation steps
+    grad_accumulation_steps: int = 4                                                # Gradient accumulation steps
     image_aug: bool = True                                                          # Whether to train with image augmentations
     save_latest_checkpoint_only: bool = False                                       # Whether to keep only the latest checkpoint
 
@@ -73,7 +74,7 @@ class FinetuneConfig:
     use_quantization: bool = False                                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
 
     # Tracking Parameters
-    wandb_project: str = "openvla-frontview"                                                  # Name of W&B project to log to
+    wandb_project: str = "openvla-frontview-test"                                                  # Name of W&B project to log to
     wandb_entity: str = "szliutong-wuhan-university"                                # Name of entity to log under
     run_id_note: Optional[str] = None                                               # Extra note for logging, Weights & Biases
     # fmt: on
@@ -81,9 +82,16 @@ class FinetuneConfig:
 
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
+    if cfg.camera_name not in CAMERA_VIEW_MAP:
+        raise ValueError(
+            f"Unsupported camera_name `{cfg.camera_name}`. "
+            f"Choose from: {', '.join(SUPPORTED_CAMERA_NAMES)}"
+        )
+    camera_view = CAMERA_VIEW_MAP[cfg.camera_name]
+
     print(
         f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on LIBERO benchmark `{cfg.dataset_name}` "
-        f"with camera `{cfg.camera_view}`"
+        f"with camera `{cfg.camera_name}` -> `{camera_view}`"
     )
 
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
@@ -93,7 +101,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     exp_id = (
         f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
-        f"+cam-{cfg.camera_view}"
+        f"+cam-{cfg.camera_name}"
         f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
         f"+lr-{cfg.learning_rate}"
     )
@@ -162,7 +170,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.data_root_dir,
         cfg.dataset_name,
         batch_transform,
-        camera_view=cfg.camera_view,
+        camera_view=camera_view,
         train=True,
         image_aug=cfg.image_aug,
     )
