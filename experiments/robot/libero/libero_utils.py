@@ -48,15 +48,24 @@ def resize_image(img, resize_size):
     return img
 
 
+def correct_libero_image_orientation(img):
+    """Converts LIBERO offscreen renders to a top-left image convention."""
+    return np.flip(img, axis=0).copy()
+
+
 def get_libero_image(obs, resize_size):
-    """Extracts image from observations and preprocesses it."""
+    """Extracts the model input image from observations and preprocesses it."""
     assert isinstance(resize_size, int) or isinstance(resize_size, tuple)
     if isinstance(resize_size, int):
         resize_size = (resize_size, resize_size)
-    img = obs["agentview_image"]
-    img = img[::-1, ::-1]  # IMPORTANT: rotate 180 degrees to match train preprocessing
+    img = correct_libero_image_orientation(obs["agentview_image"])
     img = resize_image(img, resize_size)
     return img
+
+
+def get_libero_rollout_frame(obs):
+    """Extracts a human-viewable rollout frame from environment observations."""
+    return correct_libero_image_orientation(obs["agentview_image"])
 
 
 def _slugify_path_component(value, max_length=80):

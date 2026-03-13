@@ -30,12 +30,15 @@ from libero.libero import benchmark
 
 import wandb
 
-# Append current directory so that interpreter can find experiments.robot
-sys.path.append("../..")
+# Add the repository root so `experiments.*` imports do not depend on the shell cwd.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
     get_libero_env,
     get_libero_image,
+    get_libero_rollout_frame,
     quat2axisangle,
     save_rollout_video,
 )
@@ -59,8 +62,8 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    # pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b"     # Pretrained checkpoint path
-    pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b-finetuned-libero-spatial"     # Pretrained checkpoint path
+    pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b"     # Pretrained checkpoint path
+    # pretrained_checkpoint: Union[str, Path] = "openvla/openvla-7b-finetuned-libero-spatial"     # Pretrained checkpoint path
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
@@ -156,130 +159,139 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
+        if cfg.num_trials_per_task > len(initial_states):
+            raise ValueError(
+                "num_trials_per_task exceeds the available initial states for this task: "
+                f"{cfg.num_trials_per_task} > {len(initial_states)}"
+            )
 
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
 
-        # Start episodes
-        task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-            print(f"\nTask: {task_description}")
-            log_file.write(f"\nTask: {task_description}\n")
+        try:
+            # Start episodes
+            task_episodes, task_successes = 0, 0
+            for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+                print(f"\nTask: {task_description}")
+                log_file.write(f"\nTask: {task_description}\n")
 
-            # Reset environment
-            env.reset()
+                # Reset environment
+                env.reset()
 
-            # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+                # Set initial states
+                obs = env.set_init_state(initial_states[episode_idx])
 
-            # Setup
-            t = 0
-            done = False
-            replay_images = []
-            if cfg.task_suite_name == "libero_spatial":
-                max_steps = 220  # longest training demo has 193 steps
-            elif cfg.task_suite_name == "libero_object":
-                max_steps = 280  # longest training demo has 254 steps
-            elif cfg.task_suite_name == "libero_goal":
-                max_steps = 300  # longest training demo has 270 steps
-            elif cfg.task_suite_name == "libero_10":
-                max_steps = 520  # longest training demo has 505 steps
-            elif cfg.task_suite_name == "libero_90":
-                max_steps = 400  # longest training demo has 373 steps
+                # Setup
+                t = 0
+                done = False
+                replay_images = []
+                if cfg.task_suite_name == "libero_spatial":
+                    max_steps = 220  # longest training demo has 193 steps
+                elif cfg.task_suite_name == "libero_object":
+                    max_steps = 280  # longest training demo has 254 steps
+                elif cfg.task_suite_name == "libero_goal":
+                    max_steps = 300  # longest training demo has 270 steps
+                elif cfg.task_suite_name == "libero_10":
+                    max_steps = 520  # longest training demo has 505 steps
+                elif cfg.task_suite_name == "libero_90":
+                    max_steps = 400  # longest training demo has 373 steps
 
-            print(f"Starting episode {task_episodes+1}...")
-            log_file.write(f"Starting episode {task_episodes+1}...\n")
-            while t < max_steps + cfg.num_steps_wait:
-                try:
-                    # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
-                    # and we need to wait for them to fall
-                    if t < cfg.num_steps_wait:
-                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                print(f"Starting episode {task_episodes+1}...")
+                log_file.write(f"Starting episode {task_episodes+1}...\n")
+                while t < max_steps + cfg.num_steps_wait:
+                    try:
+                        # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
+                        # and we need to wait for them to fall
+                        if t < cfg.num_steps_wait:
+                            obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                            t += 1
+                            continue
+
+                        # Get model input image and a human-viewable rollout frame separately.
+                        img = get_libero_image(obs, resize_size)
+                        rollout_img = get_libero_rollout_frame(obs)
+
+                        # Save the corrected environment frame for replay video.
+                        replay_images.append(rollout_img)
+
+                        # Prepare observations dict
+                        # Note: OpenVLA does not take proprio state as input
+                        observation = {
+                            "full_image": img,
+                            "state": np.concatenate(
+                                (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                            ),
+                        }
+
+                        # Query model to get action
+                        action = get_action(
+                            cfg,
+                            model,
+                            observation,
+                            task_description,
+                            processor=processor,
+                        )
+
+                        # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
+                        action = normalize_gripper_action(action, binarize=True)
+
+                        # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
+                        # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
+                        if cfg.model_family == "openvla":
+                            action = invert_gripper_action(action)
+
+                        # Execute action in environment
+                        obs, reward, done, info = env.step(action.tolist())
+                        if done:
+                            task_successes += 1
+                            total_successes += 1
+                            break
                         t += 1
-                        continue
 
-                    # Get preprocessed image
-                    img = get_libero_image(obs, resize_size)
-
-                    # Save preprocessed image for replay video
-                    replay_images.append(img)
-
-                    # Prepare observations dict
-                    # Note: OpenVLA does not take proprio state as input
-                    observation = {
-                        "full_image": img,
-                        "state": np.concatenate(
-                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                        ),
-                    }
-
-                    # Query model to get action
-                    action = get_action(
-                        cfg,
-                        model,
-                        observation,
-                        task_description,
-                        processor=processor,
-                    )
-
-                    # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
-                    action = normalize_gripper_action(action, binarize=True)
-
-                    # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
-                    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-                    if cfg.model_family == "openvla":
-                        action = invert_gripper_action(action)
-
-                    # Execute action in environment
-                    obs, reward, done, info = env.step(action.tolist())
-                    if done:
-                        task_successes += 1
-                        total_successes += 1
+                    except Exception as e:
+                        print(f"Caught exception: {e}")
+                        log_file.write(f"Caught exception: {e}\n")
                         break
-                    t += 1
 
-                except Exception as e:
-                    print(f"Caught exception: {e}")
-                    log_file.write(f"Caught exception: {e}\n")
-                    break
+                task_episodes += 1
+                total_episodes += 1
 
-            task_episodes += 1
-            total_episodes += 1
+                # Save a replay video of the episode
+                save_rollout_video(
+                    replay_images,
+                    total_episodes,
+                    success=done,
+                    task_description=task_description,
+                    task_name=task.name,
+                    task_suite_name=cfg.task_suite_name,
+                    rollout_root_dir=cfg.rollout_root_dir,
+                    log_file=log_file,
+                )
 
-            # Save a replay video of the episode
-            save_rollout_video(
-                replay_images,
-                total_episodes,
-                success=done,
-                task_description=task_description,
-                task_name=task.name,
-                task_suite_name=cfg.task_suite_name,
-                rollout_root_dir=cfg.rollout_root_dir,
-                log_file=log_file,
-            )
+                # Log current results
+                print(f"Success: {done}")
+                print(f"# episodes completed so far: {total_episodes}")
+                print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+                log_file.write(f"Success: {done}\n")
+                log_file.write(f"# episodes completed so far: {total_episodes}\n")
+                log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+                log_file.flush()
 
-            # Log current results
-            print(f"Success: {done}")
-            print(f"# episodes completed so far: {total_episodes}")
-            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-            log_file.write(f"Success: {done}\n")
-            log_file.write(f"# episodes completed so far: {total_episodes}\n")
-            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+            # Log final results
+            print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+            print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+            log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
+            log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
             log_file.flush()
-
-        # Log final results
-        print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-        log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
-        log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
-        log_file.flush()
-        if cfg.use_wandb:
-            wandb.log(
-                {
-                    f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
-                    f"num_episodes/{task_description}": task_episodes,
-                }
-            )
+            if cfg.use_wandb:
+                wandb.log(
+                    {
+                        f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
+                        f"num_episodes/{task_description}": task_episodes,
+                    }
+                )
+        finally:
+            env.close()
 
     # Save local log file
     log_file.close()
