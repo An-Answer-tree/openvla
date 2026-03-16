@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=openvla-libero-backview
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=96G
+#SBATCH --time=2-00:00:00
+#SBATCH --output=/home/liutong/Projects/openvla/logs/%x-%j.log
+
+set -eo pipefail
+
+source /home/liutong/.bashrc
+conda activate openvla
+
+export http_proxy="http://localhost:7878"
+export https_proxy="http://localhost:7878"
+
+mkdir -p /opt/liutong/openvla-runs/backview
+mkdir -p /opt/liutong/openvla-adapter-tmp/backview
+
+cd /home/liutong/Projects/openvla
+
+echo "[$(date '+%F %T')] job=${SLURM_JOB_ID:-N/A} node=$(hostname) gpus=4 camera=backview"
+
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc-per-node=4 \
+  --master-port=29500 \
+  vla-scripts/finetune_libero/finetune.py \
+  --camera_name backview \
+  --wandb_project openvla-libero-backview \
+  --run_root_dir /opt/liutong/openvla-runs/backview \
+  --adapter_tmp_dir /opt/liutong/openvla-adapter-tmp/backview

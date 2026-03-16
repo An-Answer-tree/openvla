@@ -2,14 +2,14 @@
 
 set -eo pipefail
 
-source /home/szliutong/miniconda3/etc/profile.d/conda.sh
-conda create -n tmp python=3.10 -y
-conda activate tmp
+source /home/liutong/.bashrc
+conda create -n openvla python=3.10 -y
+conda activate openvla
 conda install nvidia::cuda==13.0.0 -y
 
-OPENVLA_ROOT="/home/szliutong/Projects/openvla"
-LIBERO_ROOT="/home/szliutong/Projects/LIBERO"
-MAX_JOBS="4"
+export OPENVLA_ROOT="/home/liutong/Projects/openvla"
+export LIBERO_ROOT="/home/liutong/Projects/lerobot-libero-NewViewCameras"
+export MAX_JOBS="4"
 
 export TOKENIZERS_PARALLELISM=false
 
