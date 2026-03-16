@@ -6,6 +6,7 @@ structure and replacing only the dataset loader.
 """
 
 import os
+import random
 import sys
 from collections import deque
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import draccus
+import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
@@ -66,6 +68,8 @@ class FinetuneConfig:
     grad_accumulation_steps: int = 4                                                # Gradient accumulation steps
     image_aug: bool = True                                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                                              # Dataloader shuffle buffer size
+    seed: int = 7                                                                   # Global experiment seed
+    global_shuffle_across_ranks: bool = True                                        # Shard one global shuffle stream across ranks
     save_latest_checkpoint_only: bool = False                                       # Whether to keep only the latest checkpoint
 
     # LoRA Arguments
@@ -95,6 +99,11 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"with camera `{cfg.camera_name}` -> `{camera_view}`"
     )
 
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
+
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
     distributed_state = PartialState()
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
@@ -105,6 +114,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"+cam-{cfg.camera_name}"
         f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
         f"+lr-{cfg.learning_rate}"
+        f"+seed-{cfg.seed}"
     )
     if cfg.use_lora:
         exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
@@ -175,6 +185,8 @@ def finetune(cfg: FinetuneConfig) -> None:
         train=True,
         image_aug=cfg.image_aug,
         shuffle_buffer_size=cfg.shuffle_buffer_size,
+        seed=cfg.seed,
+        global_shuffle_across_ranks=cfg.global_shuffle_across_ranks,
     )
 
     if distributed_state.is_main_process:

@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -6,7 +7,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import h5py
 import numpy as np
 from PIL import Image
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from torchvision.transforms import ColorJitter, InterpolationMode, RandomResizedCrop
 
 
@@ -36,6 +37,7 @@ class LiberoMultiviewDataset(IterableDataset):
         shuffle_buffer_size: int = 100_000,
         seed: Optional[int] = None,
         repeat: bool = True,
+        global_shuffle_across_ranks: bool = False,
     ) -> None:
         self.data_root_dir = Path(data_root_dir)
         self.benchmark_name = benchmark_name
@@ -46,6 +48,7 @@ class LiberoMultiviewDataset(IterableDataset):
         self.shuffle_buffer_size = max(int(shuffle_buffer_size), 1)
         self.seed = seed
         self.repeat = repeat
+        self.global_shuffle_across_ranks = global_shuffle_across_ranks
 
         self.dataset_dir = self._resolve_dataset_dir(self.data_root_dir, self.benchmark_name)
         self.trajectories, self.transitions, stats = self._index_dataset(self.dataset_dir)
@@ -244,6 +247,14 @@ class LiberoMultiviewDataset(IterableDataset):
         if num_transitions == 0:
             return
 
+        if not self.train:
+            while True:
+                for transition_idx in range(num_transitions):
+                    yield transition_idx
+
+                if not self.repeat:
+                    return
+
         def next_transition_from_source(cursor: int) -> tuple[int, int | None]:
             if num_transitions == 0:
                 return cursor, None
@@ -284,12 +295,38 @@ class LiberoMultiviewDataset(IterableDataset):
             else:
                 buffer[pick_idx] = next_transition_idx
 
+    def _iter_sharded_transition_indices(self, rng: np.random.Generator) -> Iterator[int]:
+        if not self.global_shuffle_across_ranks:
+            yield from self._iter_transition_indices(rng)
+            return
+
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", "0"))
+        worker_info = get_worker_info()
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+        worker_id = worker_info.id if worker_info is not None else 0
+
+        num_shards = world_size * num_workers
+        shard_id = rank * num_workers + worker_id
+
+        for stream_idx, transition_idx in enumerate(self._iter_transition_indices(rng)):
+            if stream_idx % num_shards == shard_id:
+                yield transition_idx
+
     def __iter__(self) -> Iterator[Dict[str, Any]]:
-        rng = np.random.default_rng(self.seed)
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        rank = int(os.environ.get("RANK", "0"))
+        if self.seed is None:
+            rng = np.random.default_rng()
+        elif self.global_shuffle_across_ranks:
+            rng = np.random.default_rng(self.seed)
+        else:
+            rng = np.random.default_rng(self.seed + 10_000 * rank + worker_id)
         handle_cache: Dict[str, h5py.File] = {}
 
         try:
-            for transition_idx in self._iter_transition_indices(rng):
+            for transition_idx in self._iter_sharded_transition_indices(rng):
                 transition = self.transitions[transition_idx]
                 trajectory = self.trajectories[transition.trajectory_idx]
                 if trajectory.file_path not in handle_cache:
